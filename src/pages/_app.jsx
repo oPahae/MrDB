@@ -23,6 +23,22 @@ export default function MyApp({ Component, pageProps }) {
     localStorage.setItem("theme", dark ? "dark" : "light");
   }, [dark]);
 
+  // ───── Inject Adsterra Script ─────
+  useEffect(() => {
+    if (!router.pathname.includes("login") && !router.pathname.includes("register")) {
+      const script = document.createElement("script");
+      script.src = "https://pl28904002.effectivegatecpm.com/9c/62/08/9c620848a6f4c7026ba6dfc56863f17f.js";
+      script.async = true;
+      document.body.appendChild(script);
+
+      // Optionnel : nettoyer le script lors du changement de page
+      return () => {
+        document.body.removeChild(script);
+      };
+    }
+  }, [router.pathname]);
+  // ────────────────────────────────
+
   return (
     <>
       <Head>
