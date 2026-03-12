@@ -1,0 +1,131 @@
+// /api/_insert.js
+import pool from './_connect';
+
+// ─── Helper sleep ────────────────────────────────────────────────
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ─── Helper fetch avec retry si 429 ─────────────────────────────
+async function tvmazeFetch(path, retries = 0) {
+  const url = `https://api.tvmaze.com${path}`;
+  const res = await fetch(url);
+
+  if (res.status === 429) {
+    const wait = (res.headers.get('Retry-After') || 5) * 1000;
+    console.log(`Rate limited, retrying in ${wait/1000}s…`);
+    await sleep(wait);
+    return tvmazeFetch(path, retries + 1);
+  }
+
+  if (!res.ok) throw new Error(`TVMaze error: ${res.status}`);
+  return res.json();
+}
+
+// ─── Helper format date ─────────────────────────────────────────
+function formatDate(str) {
+  if (!str) return null;
+  const d = new Date(str);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// ─── Main handler ───────────────────────────────────────────────
+export default async function handler(req, res) {
+  const conn = await pool.getConnection();
+
+  try {
+    console.log('\n🚀 Fetching series from TVMaze…\n');
+
+    // 1) Récupérer les séries d’une page (0 → 250 séries)
+    const shows = await tvmazeFetch('/shows?page=0');
+    console.log(`📺 ${shows.length} shows to process.\n`);
+
+    await conn.beginTransaction();
+    let stats = { series: 0, seasons: 0, episodes: 0 };
+
+    for (const show of shows) {
+      // ─── Filtrage par type ─────────────────────────────
+      // TVMaze a show.type ou show.genres
+      const typeLower = (show.type || '').toLowerCase();
+      if (typeLower === 'cartoon') {
+        console.log(`⛔ Skipping cartoon: ${show.name}`);
+        continue; // on ne l'ajoute pas
+      }
+
+      let dbType = 'series';
+      if (typeLower === 'anime') dbType = 'anime';
+
+      console.log(`➡️  Processing: ${show.name} [type: ${dbType}]`);
+
+      // Infos série
+      const seriesTitle = show.name;
+      const img = show.image?.original || show.image?.medium || null;
+      const descr = show.summary ? show.summary.replace(/<[^>]*>/g, '') : null;
+      const startDate = formatDate(show.premiered);
+      const endDate = formatDate(show.ended);
+      const rating = show.rating?.average || 0;
+      const finished = !!show.ended;
+
+      // Insert série
+      const [srResult] = await conn.execute(
+        `INSERT INTO series (title, img, trailer, descr, finished, type, start, end, maker, rating)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [seriesTitle, img, null, descr, finished, dbType, startDate, endDate, null, rating]
+      );
+      const seriesDbId = srResult.insertId;
+      stats.series++;
+
+      // ─── Récupérer saisons ─────────────────────────────
+      const seasons = await tvmazeFetch(`/shows/${show.id}/seasons`);
+      await sleep(300); // pause pour éviter 429
+
+      for (const s of seasons) {
+        const seasonNumber = s.number ?? 0;
+        const seasonTitle = s.name || `Season ${seasonNumber}`;
+
+        const [snResult] = await conn.execute(
+          `INSERT INTO seasons (serieID, title, number)
+           VALUES (?, ?, ?)`,
+          [seriesDbId, seasonTitle, seasonNumber]
+        );
+        const seasonDbId = snResult.insertId;
+        stats.seasons++;
+
+        // ─── Récupérer épisodes ─────────────────────
+        const eps = await tvmazeFetch(`/seasons/${s.id}/episodes`);
+        await sleep(200); // pause pour éviter 429
+
+        for (let i = 0; i < eps.length; i++) {
+          const ep = eps[i];
+          const epNumber = ep.number ?? (i + 1);
+          const epTitle = ep.name || `Episode ${epNumber}`;
+          const epImg = ep.image?.medium || ep.image?.original || null;
+          const epRating = ep.rating?.average || 0;
+
+          await conn.execute(
+            `INSERT INTO episodes (seasonID, number, title, img, rating)
+             VALUES (?, ?, ?, ?, ?)`,
+            [seasonDbId, epNumber, epTitle, epImg, epRating]
+          );
+          stats.episodes++;
+        }
+      }
+    }
+
+    await conn.commit();
+
+    console.log('\n✅ Import completed!');
+    console.log(`   📺 Series : ${stats.series}`);
+    console.log(`   🗂️ Seasons: ${stats.seasons}`);
+    console.log(`   🎬 Episodes: ${stats.episodes}\n`);
+
+    res.status(200).json({ success: true, stats });
+
+  } catch (err) {
+    await conn.rollback();
+    console.error('❌ Import error:', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    conn.release();
+  }
+}
