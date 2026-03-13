@@ -372,7 +372,7 @@ export default function Header({ dark, setDark, session }) {
               style={{ fontFamily: "'Cairo', sans-serif" }}
             >
               <Film size={16} className="text-amber-500" />
-              كاع الحلقات
+              كاع السيريات
             </Link>
             <Link
               href="/top"
